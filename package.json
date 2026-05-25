@@ -1,0 +1,16 @@
+{
+  "name": "ai-interview-app",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend && node server.js",
+    "frontend": "cd frontend/interview_prep && npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^8.0.0"
+  },
+  "dependencies": {
+    "openai": "^6.34.0",
+    "react-markdown": "^10.1.0"
+  }
+}
