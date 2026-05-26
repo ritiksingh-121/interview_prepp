@@ -18,8 +18,6 @@ app.use(express.json());
 app.use("/api/interview", interviewRoutes);
 app.use("/api/feedback", feedbackRoutes);
 
-
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // 🧩 CREATE CHECKOUT SESSION
