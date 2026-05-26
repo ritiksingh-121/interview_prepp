@@ -1,41 +1,69 @@
 import React, { useState, useEffect, useRef } from "react";
 import ChatBox from "../components/ChatBox";
 import RoleSelector from "../components/RoleSelector";
-import { sendInterviewMessage, getFeedback } from "../api/api";
+import { sendInterviewMessage } from "../api/api";
 
 export default function InterviewPage() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [role, setRole] = useState("Frontend Developer");
   const [loading, setLoading] = useState(false);
-  const [isInterviewStarted, setIsInterviewStarted] = useState(false);
+  const [step, setStep] = useState("role");
   const [listening, setListening] = useState(false);
 
   const bottomRef = useRef(null);
   const videoRef = useRef(null);
   const recognitionRef = useRef(null);
   const streamRef = useRef(null);
+  const isProcessingRef = useRef(false);
+
+  // 🔥 CLEAN FUNCTION (single source of truth)
+  const cleanText = (text) => {
+    return text
+      .replace(/📌.*?\n/g, "")
+      .replace(/⚡.*?\n/g, "")
+      .replace(/🚀.*?\n/g, "")
+      .replace(/•/g, "")
+      .replace(/Definition:|Key Points:|Use Case:/gi, "")
+      .split("\n")
+      .filter((line) => {
+        const t = line.trim().toLowerCase();
+
+        if (t.split(" ").length <= 3) return false;
+        if (t.includes("key point")) return false;
+        if (t.includes("used in real-world")) return false;
+        if (t.includes("application")) return false;
+
+        return true;
+      })
+      .join("\n")
+      .replace(/\n{2,}/g, "\n")
+      .trim();
+  };
 
   // 🔽 Auto scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // 🎥 CAMERA FIXED
+  // 🎥 CAMERA
   useEffect(() => {
-    if (!isInterviewStarted) return;
+    if (step !== "interview") return;
 
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: true,
-          audio: false, // 🔥 IMPORTANT
+          audio: false,
         });
 
         streamRef.current = stream;
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current.play();
+          };
         }
       } catch (err) {
         console.error("Camera error:", err);
@@ -44,13 +72,10 @@ export default function InterviewPage() {
 
     startCamera();
 
-    // 🔥 CLEANUP
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
+      streamRef.current?.getTracks().forEach((track) => track.stop());
     };
-  }, [isInterviewStarted]);
+  }, [step]);
 
   // 🎤 Speech Recognition
   useEffect(() => {
@@ -61,31 +86,41 @@ export default function InterviewPage() {
 
     const recognition = new SpeechRecognition();
     recognition.lang = "en-US";
+    recognition.interimResults = true;
 
     recognition.onstart = () => setListening(true);
     recognition.onend = () => setListening(false);
 
     recognition.onresult = (event) => {
-      const text = event.results[0][0].transcript;
+      const result = event.results[event.results.length - 1];
+
+      if (!result.isFinal || isProcessingRef.current) return;
+
+      isProcessingRef.current = true;
+
+      const text = result[0].transcript;
       setInput(text);
 
-      setTimeout(() => sendMessage(text), 500);
+      sendMessage(text);
+
+      setTimeout(() => {
+        isProcessingRef.current = false;
+      }, 1000);
     };
 
     recognitionRef.current = recognition;
   }, []);
 
-  // 🔊 Speak
   const speak = (text) => {
     if (!window.speechSynthesis) return;
 
-    const cleanText = text.replace(/📌|⚡|🚀|\*|\n/g, "");
-
-    const utterance = new SpeechSynthesisUtterance(cleanText);
+    const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
 
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+   window.speechSynthesis.cancel(); // stop previous
+setTimeout(() => {
+  window.speechSynthesis.speak(utterance);
+}, 100);
   };
 
   const startListening = () => recognitionRef.current?.start();
@@ -93,18 +128,31 @@ export default function InterviewPage() {
 
   // 🚀 Start Interview
   const startInterview = async () => {
+    setStep("interview");
     setLoading(true);
-    setIsInterviewStarted(true);
 
     try {
       const data = await sendInterviewMessage({
         role,
-        message: "Start interview",
+       message: `
+Start a REAL ${role} interview.
+
+Rules:
+- Ask ONLY ONE question
+- DO NOT explain anything
+- DO NOT give answers
+- DO NOT give hints
+- Just ask the question like a real interviewer
+
+Example:
+"Explain Virtual DOM in React"
+`,
         history: [],
       });
 
-      setMessages([{ role: "assistant", content: data.reply }]);
-      speak(data.reply);
+      setMessages([{ role: "assistant", content: cleanText(data.reply) }]);
+      const cleaned = cleanText(data.reply);
+speak(cleaned);
     } catch (err) {
       console.error(err);
     }
@@ -112,134 +160,193 @@ export default function InterviewPage() {
     setLoading(false);
   };
 
-  // 💬 Send Message (FIXED STATE BUG)
+  // 💬 Send Message
   const sendMessage = async (customInput) => {
+    if (step !== "interview") return;
+
     const text = customInput || input;
     if (!text.trim()) return;
 
     const userMsg = { role: "user", content: text };
 
-    setMessages((prev) => {
-      const updated = [...prev, userMsg];
-      return updated;
-    });
-
     setInput("");
     setLoading(true);
 
-    try {
-      const data = await sendInterviewMessage({
-        role,
-        message: text,
-        history: messages,
-      });
-
-      const aiMsg = { role: "assistant", content: data.reply };
-
-      speak(data.reply);
-
-      const lastQuestion = messages[messages.length - 1]?.content;
-
-      try {
-        await getFeedback({
-          question: lastQuestion,
-          answer: text,
-        });
-      } catch {}
-
-      setMessages((prev) => [...prev, aiMsg]);
-    } catch (err) {
-      console.error(err);
-    }
-
-    setLoading(false);
+    setMessages((prev) => {
+      const updated = [...prev, userMsg];
+      handleAIResponse(updated, text);
+      return updated;
+    });
   };
 
-  return (
-    <div className="h-screen flex flex-col bg-black text-white">
-      {/* HEADER */}
-      <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-black/40">
-        <h1 className="text-xl font-bold text-pink-500">AI Interview</h1>
+ const handleAIResponse = async (updatedMessages, text) => {
+  try {
+    let finalMessage = "";
 
-        <RoleSelector
-          role={role}
-          setRole={setRole}
-          disabled={messages.length > 0}
-        />
-      </div>
+    const lower = text.trim().toLowerCase();
 
-      {/* MAIN */}
-      <div className="flex-1 p-6 flex flex-col items-center">
-        {messages.length === 0 ? (
-          <div className="flex flex-col items-center mt-20 gap-6">
-            <h2 className="text-4xl font-bold text-pink-500">
-              Start Your AI Interview 🚀
-            </h2>
+    // ✅ skip logic
+    if (lower.includes("next") || lower.includes("skip")) {
+      finalMessage = `
+Candidate skipped the question.
 
-            <button
-              onClick={startInterview}
-              className="px-8 py-3 bg-purple-600 rounded-xl"
-            >
-              Start Interview
-            </button>
+Do NOT explain the previous answer.
+Just ask a new interview question.
+`;
+    } else {
+      finalMessage = `
+Candidate answer: ${text}
+
+Your task:
+1. Give feedback in 2-3 lines
+2. Mention what is missing (1 line)
+3. Do NOT give full solution
+4. Then ask NEXT question
+`;
+    }
+
+    // 🔥 THIS WAS MISSING
+    const data = await sendInterviewMessage({
+      role,
+      message: finalMessage,
+      history: updatedMessages,
+    });
+
+    const cleaned = cleanText(data.reply);
+
+    const aiMsg = {
+      role: "assistant",
+      content: cleaned,
+    };
+
+    speak(cleaned);
+
+    setMessages((prev) => [...prev, aiMsg]);
+  } catch (err) {
+    console.error(err);
+  }
+
+  setLoading(false);
+};
+
+return (
+  <div className="h-screen flex flex-col bg-black text-white relative overflow-hidden">
+
+    {/* 🌌 BACKGROUND */}
+    <div className="absolute inset-0 -z-10">
+      <div className="absolute top-1/3 left-1/2 w-[600px] h-[600px] bg-pink-500/20 blur-[120px] rounded-full -translate-x-1/2"></div>
+      <div className="absolute bottom-0 right-0 w-[400px] h-[400px] bg-purple-500/20 blur-[120px] rounded-full"></div>
+    </div>
+
+    {/* HEADER */}
+    <div className="p-4 border-b border-white/10 flex justify-between items-center backdrop-blur-md bg-black/30">
+      <h1 className="text-xl font-bold bg-gradient-to-r from-pink-500 to-purple-500 bg-clip-text text-transparent">
+        AI Interview
+      </h1>
+    </div>
+
+    {/* MAIN */}
+    <div className="flex-1 flex flex-col">
+
+      {step === "role" && (
+        <div className="flex flex-col items-center justify-center flex-1 gap-8">
+          <h2 className="text-5xl font-bold bg-gradient-to-r from-pink-500 to-purple-500 bg-clip-text text-transparent">
+            Crack Interviews with AI
+          </h2>
+
+          <div className="backdrop-blur-xl bg-white/5 border border-white/10 p-6 rounded-2xl">
+            <RoleSelector role={role} setRole={setRole} />
           </div>
-        ) : (
-          <div className="w-full max-w-6xl flex gap-6">
-            {/* 🎥 CAMERA */}
-            <div className="w-72 bg-gray-900 p-3 rounded-xl">
-              <p className="text-gray-400 mb-2">You</p>
-
-             <video
-  ref={videoRef}
-  autoPlay
-  muted
-  playsInline
-  className="w-full h-48 object-cover rounded-lg bg-black"
-/>
-            </div>
-
-            {/* 💬 CHAT */}
-            <div className="flex-1 bg-gray-900 p-4 rounded-xl overflow-y-auto max-h-[70vh]">
-              <ChatBox messages={messages} />
-
-              {loading && (
-                <p className="text-gray-400 mt-2 animate-pulse">
-                  AI is thinking...
-                </p>
-              )}
-
-              <div ref={bottomRef}></div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* INPUT */}
-      {messages.length > 0 && (
-        <div className="p-4 border-t border-gray-800 flex gap-3">
-          <input
-            className="flex-1 p-3 bg-gray-900 border border-gray-700 rounded-lg"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Speak or type..."
-            onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-          />
 
           <button
-            onClick={listening ? stopListening : startListening}
-            className="px-4 bg-purple-600 rounded-lg"
+            onClick={startInterview}
+            className="px-10 py-3 rounded-xl bg-gradient-to-r from-pink-500 to-purple-500 hover:scale-105 transition"
           >
-            🎤
-          </button>
-
-          <button
-            onClick={() => sendMessage()}
-            className="px-6 bg-pink-500 rounded-lg"
-          >
-            Send
+            Get Started
           </button>
         </div>
       )}
+
+      {step === "interview" && (
+        <>
+          {/* 🎯 CENTER SECTION */}
+          <div className="flex-1 flex flex-col justify-center items-center px-4">
+
+            <div className="w-full max-w-6xl flex gap-8 items-center">
+
+              {/* CAMERA */}
+              <div className="w-72 backdrop-blur-xl bg-white/5 border border-white/10 p-3 rounded-2xl shadow-lg">
+                <p className="text-gray-400 mb-2">You</p>
+
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  className="w-full h-48 object-cover rounded-lg bg-black"
+                />
+              </div>
+
+              {/* CHAT */}
+              <div className="flex-1 backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl flex flex-col shadow-lg max-h-[60vh]">
+
+                <p className="text-sm text-gray-400 p-4 border-b border-white/10">
+                  🎯 Mock Interview ({role})
+                </p>
+
+                <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                  <ChatBox messages={messages} />
+
+                  {loading && (
+                    <p className="text-gray-400 animate-pulse">
+                      🤖 Thinking...
+                    </p>
+                  )}
+
+                  <div ref={bottomRef}></div>
+                </div>
+
+              </div>
+
+            </div>
+          </div>
+
+          {/* 💬 INPUT (NOT STUCK TO BOTTOM NOW) */}
+          <div className="pb-10 pt-4 flex justify-center">
+
+            <div className="flex gap-3 w-full max-w-3xl">
+
+              <input
+                className="flex-1 p-3 bg-white/5 border border-white/10 rounded-xl outline-none text-white placeholder-gray-400 focus:border-pink-500 transition"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Answer like a pro..."
+                onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+              />
+
+              <button
+                onClick={listening ? stopListening : startListening}
+                disabled={loading}
+                className={`px-4 rounded-xl transition ${
+                  listening
+                    ? "bg-red-500 animate-pulse"
+                    : "bg-white/10 hover:bg-white/20"
+                }`}
+              >
+                🎤
+              </button>
+
+              <button
+                onClick={() => sendMessage()}
+                className="px-5 py-2 rounded-xl bg-gradient-to-r from-pink-500 to-purple-500 hover:opacity-90 transition"
+              >
+                ➤
+              </button>
+
+            </div>
+          </div>
+        </>
+      )}
     </div>
-  );
-}
+  </div>
+);}
